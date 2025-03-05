@@ -13,6 +13,8 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+var f = excelize.NewFile()
+
 func main() {
 
 	db, err := dbconn()
@@ -213,7 +215,17 @@ func main() {
 	println("Child services inserted successfully")
 
 	//call the generate report function
+
 	generateReport(db)
+	BusinessAccounts()
+
+	filePath := "consolidated_report.xlsx"
+	if err := f.SaveAs(filePath); err != nil {
+		log.Fatalf("Failed to save Excel file: %v", err)
+	}
+
+	fmt.Println("Report generated successfully: ", filePath)
+
 }
 
 func dbconn() (*sql.DB, error) {
@@ -270,6 +282,16 @@ func generateReport(db *sql.DB) {
 		Discount  float64
 	}
 
+	type NewAccounts struct {
+		custID       string
+		customerName string
+		planName     string
+		address      string
+		description  string
+		dateSubmit   string
+		installDate  string
+	}
+
 	recordsMap := make(map[int]map[string]*Record) //intialize a map made up of maps to store the records
 	serviceNames := make(map[string]bool)          //intialize a map to store the service names
 
@@ -308,7 +330,6 @@ func generateReport(db *sql.DB) {
 		serviceNames[servName] = true
 	}
 
-	f := excelize.NewFile()
 	sheetName := "GOB Breakdown"
 	f.SetSheetName("Sheet1", sheetName)
 
@@ -326,8 +347,27 @@ func generateReport(db *sql.DB) {
 		Fill: excelize.Fill{Type: "pattern", Color: []string{"#4F81BD"}, Pattern: 1},
 	})
 	GOBtotalStyle, _ := f.NewStyle(&excelize.Style{
-		Font: &excelize.Font{Bold: true, Color: "#FFFFFF"},
-		Fill: excelize.Fill{Type: "pattern", Color: []string{"#4F81BD"}, Pattern: 1},
+		Font: &excelize.Font{Bold: true, Color: "#4F81BD"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#4F81BD", Style: 5},
+			{Type: "bottom", Color: "#4F81BD", Style: 5},
+			// {Type: "left", Color: "#4F81BD", Style: 5},
+			// {Type: "right", Color: "#4F81BD", Style: 5}
+		},
+	})
+
+	groups_style, _ := f.NewStyle(&excelize.Style{
+
+		Font: &excelize.Font{Bold: true, Color: "#000000"},
+	})
+
+	overall_total, _ := f.NewStyle(&excelize.Style{
+
+		Font: &excelize.Font{Bold: true, Color: "#000000"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 5},
+			{Type: "bottom", Color: "#000000", Style: 5},
+		},
 	})
 	//....................................................................................
 
@@ -374,6 +414,8 @@ func generateReport(db *sql.DB) {
 			groupSubtotal += subtotal
 
 			rowNum++
+
+			f.SetCellStyle(sheetName, fmt.Sprintf("A%d", groupStartRow), fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum-1), groups_style) // added this to sytle the group border
 		}
 
 		// Add total row for the current group
@@ -412,11 +454,11 @@ func generateReport(db *sql.DB) {
 	}
 
 	finalRow := rowNum + 1
-	f.SetCellValue(sheetName, "C"+strconv.Itoa(finalRow), "Overall Total:")
+	//f.SetCellValue(sheetName, "C"+strconv.Itoa(finalRow), "Overall Total:")
 	f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-3), finalRow), overallTotalSum)
 	f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-2), finalRow), overallGSTSum)
 	f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-1), finalRow), overallSubtotalSum)
-	f.SetCellStyle(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-3), finalRow), fmt.Sprintf("%s%d", string('A'+len(headers)-1), finalRow), GOBtotalStyle)
+	f.SetCellStyle(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-3), finalRow), fmt.Sprintf("%s%d", string('A'+len(headers)-1), finalRow), overall_total)
 
 	// ----------------------GOB SUMMARY SHEET-------------------------------------------------------------------------------------
 	summarySheetName := "GOB Summary"
@@ -431,10 +473,6 @@ func generateReport(db *sql.DB) {
 
 	// Create styles for header and total rows
 	summaryheaderStyle, _ := f.NewStyle(&excelize.Style{
-		Font: &excelize.Font{Bold: true, Color: "#FFFFFF"},
-		Fill: excelize.Fill{Type: "pattern", Color: []string{"#4F81BD"}, Pattern: 1},
-	})
-	summarytotalStyle, _ := f.NewStyle(&excelize.Style{
 		Font: &excelize.Font{Bold: true, Color: "#FFFFFF"},
 		Fill: excelize.Fill{Type: "pattern", Color: []string{"#4F81BD"}, Pattern: 1},
 	})
@@ -468,7 +506,7 @@ func generateReport(db *sql.DB) {
 
 	// ----------------------Add the total column to last row GOB SUMMARY----------------------------------------------
 	summarylastRow := summaryRowNum + 1
-	f.SetCellValue(summarySheetName, "C"+strconv.Itoa(summarylastRow), "Total:")
+	//f.SetCellValue(summarySheetName, "C"+strconv.Itoa(summarylastRow), "Total:")
 
 	// Add column sums
 	for i := 0; i < len(summaryHeaders)-3; i++ {
@@ -478,12 +516,93 @@ func generateReport(db *sql.DB) {
 	}
 
 	// Apply total style
-	f.SetCellStyle(summarySheetName, fmt.Sprintf("A%d", summarylastRow), fmt.Sprintf("F%d", summarylastRow), summarytotalStyle)
+	f.SetCellStyle(summarySheetName, fmt.Sprintf("C%d", summarylastRow), fmt.Sprintf("F%d", summarylastRow), overall_total)
 
-	filePath := "consolidated_report.xlsx"
-	if err := f.SaveAs(filePath); err != nil {
-		log.Fatalf("Failed to save Excel file: %v", err)
+	//------------------------------NEW DEDINT ACCOUNT ACTIVATIONS TABLE---------------------------------------------------------------------------------------
+
+	//type can either be 1:Corporate, 2:GOB. i will need to create 2 slice and from those save based on the customer type.
+	//pass the slice for GOB to be handles in the GOB sheet
+	//pass the type for corporate to be handled in the corporate sheet
+
+	NuevoActivations := `
+	select
+	dw.cust_id,
+	concat(c.first_name, ' ', c.last_name) as customer_name,	
+	dw.plan_name,
+	c.address,
+	dw2.description,
+	dw.date_submit,
+	dw.install_date
+from
+	dedint_workorder dw
+join
+	customer c
+on
+	dw.cust_id = c.cust_id
+join
+	dedint_workorderstatus dw2
+on
+	dw.status = dw2.status_id
+where
+	(dw.date_submit >= '2024-11-01' and dw.install_date <= '2024-11-30')
+	and c.customertype = 2 -- 0:Person, 1:Corporate, 2:GOB
+	and dw.status in ('1','3')
+order by
+	description desc;
+	`
+
+	newactivations, err := db.Query(NuevoActivations)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer newactivations.Close()
+
+	var newAcctSlice []NewAccounts
+	for newactivations.Next() {
+		var NewAcc NewAccounts
+
+		err := newactivations.Scan(&NewAcc.custID, &NewAcc.customerName, &NewAcc.planName, &NewAcc.address, &NewAcc.description, &NewAcc.dateSubmit, &NewAcc.installDate)
+		if err != nil {
+			log.Fatalf("error scanning new active accounts %v", err)
+		}
+
+		newAcctSlice = append(newAcctSlice, NewAcc)
+
 	}
 
-	fmt.Println("Report generated successfully: ", filePath)
+	f.SetCellValue(summarySheetName, fmt.Sprintf("D%d", summarylastRow+3), "New Account Activations")
+	NewAcctHeaders := []string{"No.", "CustomerID", "Customer Name", "Plan Name", "Address", "Description", "Date Submit", "Install Date"}
+	for i, NAheader := range NewAcctHeaders {
+		col := string('A' + i)
+		cellRef := fmt.Sprintf("%s%d", col, summarylastRow+4)
+		f.SetCellValue(summarySheetName, cellRef, NAheader)
+		f.SetColWidth(summarySheetName, col, col, 25)
+		f.SetCellStyle(summarySheetName, cellRef, cellRef, summaryheaderStyle)
+	}
+
+	NEWACTIVATION := summarylastRow + 5
+	for _, new := range newAcctSlice {
+
+		f.SetCellValue(summarySheetName, fmt.Sprintf("A%d", NEWACTIVATION), NEWACTIVATION-1)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("B%d", NEWACTIVATION), new.custID)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("C%d", NEWACTIVATION), new.customerName)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("D%d", NEWACTIVATION), new.planName)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("E%d", NEWACTIVATION), new.address)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("F%d", NEWACTIVATION), new.description)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("G%d", NEWACTIVATION), new.dateSubmit)
+		f.SetCellValue(summarySheetName, fmt.Sprintf("H%d", NEWACTIVATION), new.installDate)
+
+		NEWACTIVATION++
+	}
+	//------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+}
+
+func BusinessAccounts() {
+
+	Business_Summary := "Business Summary"
+	Business_breakdown := "Business Breakdown"
+	f.NewSheet(Business_Summary)
+	f.NewSheet(Business_breakdown)
+
 }
