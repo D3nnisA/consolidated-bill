@@ -15,6 +15,33 @@ import (
 
 var f = excelize.NewFile()
 
+type Record struct {
+	GroupID   int
+	AccountID int
+	GroupName string
+	Address   string
+	Services  map[string]float64
+	Total     float64
+	Taxes     float64
+	Discount  float64
+}
+
+type NewAccounts struct {
+	custID       string
+	customerName string
+	planName     string
+	address      string
+	description  string
+	dateSubmit   string
+	installDate  string
+}
+
+type BSSbalance struct {
+	Balance int    `json:"balance"`
+	Name    int    `json:"name"`
+	DueDate string `json:"due_date"`
+}
+
 func main() {
 
 	db, err := dbconn()
@@ -55,7 +82,7 @@ func main() {
 	//fmt.Println(parentIDslice)
 
 	//declare temp values to store the groupname and address
-	var groupNametemp, addresstemp string
+	var groupNametemp, addresstemp, cust_typeTemp string
 
 	for _, parentID := range parentIDslice {
 
@@ -92,7 +119,8 @@ func main() {
 			b.serv_name,
 			b.total,
 			b.taxes,
-			b.discounts
+			b.discounts,
+			b.customer_type 
 		from
 			(select
 				bs.period,
@@ -103,7 +131,8 @@ func main() {
 				bs.total,
 				bs.taxes,
 				bs.discounts,
-				bc.address
+				bc.address,
+				bc.customer_type
 			from
 				bill_services bs
 			join
@@ -143,24 +172,26 @@ func main() {
 			var total float64
 			var taxes float64
 			var discounts float64
+			var custype string
 
-			err := rows.Scan(&groupID, &period, &cycle, &accountID, &groupName, &address, &billSource, &acctServID, &servName, &total, &taxes, &discounts)
+			err := rows.Scan(&groupID, &period, &cycle, &accountID, &groupName, &address, &billSource, &acctServID, &servName, &total, &taxes, &discounts, &custype)
 			if err != nil {
-				log.Fatalf("error scanning child services")
+				log.Fatalf("error scanning child services %s", err)
 			}
 
 			//assign the groupname and address to the temp variables
 			groupNametemp = groupName
 			addresstemp = address
+			cust_typeTemp = custype
 
 			//fmt.Println(groupID, period, cycle, accountID, groupName, address, billSource, acctServID, servName, total, taxes, discounts)
 
 			//insert the child services into the consolidated_bills_summary table
 
-			insetChildServices := ` INSERT INTO public.consolidated_bills_summary (group_id,"period","cycle",account_id,group_name,address,bill_source,acct_serv_id,serv_name,total,taxes,discount,created_at)
-											VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())`
+			insetChildServices := ` INSERT INTO public.consolidated_bills_summary (group_id,"period","cycle",account_id,group_name,address,bill_source,acct_serv_id,serv_name,total,taxes,discount,account_type,created_at)
+											VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())`
 
-			_, err = db.ExecContext(context.Background(), insetChildServices, groupID, period, cycle, accountID, groupName, address, billSource, acctServID, servName, total, taxes, discounts)
+			_, err = db.ExecContext(context.Background(), insetChildServices, groupID, period, cycle, accountID, groupName, address, billSource, acctServID, servName, total, taxes, discounts, custype)
 
 			if err != nil {
 				log.Fatalf("%v", err)
@@ -197,10 +228,10 @@ func main() {
 
 			//insert the BSS services into the consolidated_bills_summary table
 
-			insertBSSservices := ` INSERT INTO public.consolidated_bills_summary (group_id,"period","cycle",account_id,group_name,address,bill_source,acct_serv_id,serv_name,total,taxes,discount,created_at)
-								VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())`
+			insertBSSservices := ` INSERT INTO public.consolidated_bills_summary (group_id,"period","cycle",account_id,group_name,address,bill_source,acct_serv_id,serv_name,total,taxes,discount,account_type,created_at)
+								VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())`
 
-			_, err = db.ExecContext(context.Background(), insertBSSservices, groupID, invoice_date, billingcycle, customerID, groupNametemp, addresstemp, "bss", invoiceID, "Postpaid", total, taxes, discount)
+			_, err = db.ExecContext(context.Background(), insertBSSservices, groupID, invoice_date, billingcycle, customerID, groupNametemp, addresstemp, "bss", invoiceID, "Postpaid", total, taxes, discount, cust_typeTemp)
 
 			if err != nil {
 				log.Fatalf("%v", err)
@@ -271,27 +302,7 @@ func generateReport(db *sql.DB) {
 	}
 	defer rows.Close()
 
-	type Record struct {
-		GroupID   int
-		AccountID int
-		GroupName string
-		Address   string
-		Services  map[string]float64
-		Total     float64
-		Taxes     float64
-		Discount  float64
-	}
-
-	type NewAccounts struct {
-		custID       string
-		customerName string
-		planName     string
-		address      string
-		description  string
-		dateSubmit   string
-		installDate  string
-	}
-
+	//create 2 maps to store GOB and Corporate records
 	recordsMap := make(map[int]map[string]*Record) //intialize a map made up of maps to store the records
 	serviceNames := make(map[string]bool)          //intialize a map to store the service names
 
@@ -420,13 +431,13 @@ func generateReport(db *sql.DB) {
 
 		// Add total row for the current group
 		lastRow := rowNum + 1
-		f.SetCellValue(sheetName, "C"+strconv.Itoa(lastRow), "Total:")
+		//f.SetCellValue(sheetName, "C"+strconv.Itoa(lastRow), "Total:")
 
 		for i := 0; i < len(headers)-3; i++ {
 			col := string('D' + i)
 			sumFormula := fmt.Sprintf("SUM(%s%d:%s%d)", col, groupStartRow, col, lastRow-1)
 			f.SetCellFormula(sheetName, fmt.Sprintf("%s%d", col, lastRow), sumFormula)
-			f.SetCellStyle(sheetName, fmt.Sprintf("C%d", lastRow), fmt.Sprintf("%s%d", col, lastRow), GOBtotalStyle)
+			f.SetCellStyle(sheetName, fmt.Sprintf("D%d", lastRow), fmt.Sprintf("%s%d", col, lastRow), GOBtotalStyle)
 		}
 
 		// Save group totals to overall totals
