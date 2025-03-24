@@ -1,0 +1,549 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"os"
+	"strconv"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/joho/godotenv"
+	"github.com/xuri/excelize/v2"
+)
+
+var f = excelize.NewFile()
+
+type Record struct {
+	GroupID     int
+	AccountID   int
+	GroupName   string
+	Address     string
+	Services    map[string]float64
+	Total       float64
+	Taxes       float64
+	Discount    float64
+	Accounttype string
+}
+
+type NewAccounts struct {
+	custID       string
+	customerName string
+	planName     string
+	address      string
+	description  string
+	dateSubmit   string
+	installDate  string
+}
+
+type BSSbalance struct {
+	Balance int    `json:"balance"`
+	Name    int    `json:"name"`
+	DueDate string `json:"due_date"`
+}
+
+func main() {
+
+	db, err := dbconn()
+	if err != nil {
+		log.Fatalf("Failed to connect to the database: %v", err)
+	}
+	defer db.Close()
+
+	//select the Parents id's from the parents table
+	//save it in a slice and retrive it to be used in the child accounts FOR loop
+	parentIDQuery :=
+		`
+	select id from consolidated_parent_accounts;
+	
+	`
+
+	rows, err := db.QueryContext(context.Background(), parentIDQuery)
+	if err != nil {
+		log.Fatalf("error getting parents ID")
+
+	}
+
+	defer rows.Close()
+
+	//initialize a slice to store the parent ID's
+	var parentIDslice []int
+
+	for rows.Next() {
+		var parentID int
+		err := rows.Scan(&parentID)
+		if err != nil {
+			log.Fatalf("error scanning parent ID")
+		}
+
+		parentIDslice = append(parentIDslice, parentID)
+	}
+
+	//fmt.Println(parentIDslice)
+
+	//declare temp values to store the groupname and address
+	var groupNametemp, addresstemp, cust_typeTemp string
+
+	for _, parentID := range parentIDslice {
+
+		//loop through the parent ID's and get the child services
+
+		getChildServices :=
+			`
+				with ids as (
+			select
+				cca.id,
+				cpa.group_name,
+				cca.account_id,
+				cca.bill_source,
+				cca.status,
+				cca.group_id
+			from
+				consolidated_child_accounts cca
+			left join
+				consolidated_parent_accounts cpa
+			on
+				cca.group_id = cpa.id
+			where
+				cca.group_id = $1
+		)
+		select
+			i.group_id,
+			b.period,
+			b.cycle,
+			i.account_id,
+			i.group_name,
+			b.address,
+			i.bill_source,
+			b.acct_serv_id,
+			b.serv_name,
+			b.total,
+			b.taxes,
+			b.discounts,
+			b.customer_type 
+		from
+			(select
+				bs.period,
+				bs.cycle,
+				bs.accountid,
+				bs.acct_serv_id,
+				bs.serv_name,
+				bs.total,
+				bs.taxes,
+				bs.discounts,
+				bc.address,
+				bc.customer_type
+			from
+				bill_services bs
+			join
+				bill_cust bc
+			on
+				bs.accountid = bc.accountid
+		) b
+		right join
+			ids i
+		on
+			b.accountid = i.account_id
+		where
+			(bill_source = 'inhouse_billing' and (b.period is not null and total > 0)
+			or bill_source = 'bss' and b.period is null)
+		order by
+			account_id desc;
+
+			`
+
+		rows, err = db.QueryContext(context.Background(), getChildServices, parentID)
+		if err != nil {
+			log.Fatalf("Getting Child services %v", err)
+		}
+
+		defer rows.Close()
+
+		for rows.Next() {
+			var groupID int
+			var period string
+			var cycle string
+			var accountID int
+			var groupName string
+			var address string
+			var billSource string
+			var acctServID int
+			var servName string
+			var total float64
+			var taxes float64
+			var discounts float64
+			var custype string
+
+			err := rows.Scan(&groupID, &period, &cycle, &accountID, &groupName, &address, &billSource, &acctServID, &servName, &total, &taxes, &discounts, &custype)
+			if err != nil {
+				log.Fatalf("error scanning child services %s", err)
+			}
+
+			//assign the groupname and address to the temp variables
+			groupNametemp = groupName
+			addresstemp = address
+			cust_typeTemp = custype
+
+			//fmt.Println(groupID, period, cycle, accountID, groupName, address, billSource, acctServID, servName, total, taxes, discounts)
+
+			//insert the child services into the consolidated_bills_summary table
+
+			insetChildServices := ` INSERT INTO public.consolidated_bills_summary (group_id,"period","cycle",account_id,group_name,address,bill_source,acct_serv_id,serv_name,total,taxes,discount,account_type,created_at)
+											VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())`
+
+			_, err = db.ExecContext(context.Background(), insetChildServices, groupID, period, cycle, accountID, groupName, address, billSource, acctServID, servName, total, taxes, discounts, custype)
+
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+
+		}
+
+		//---------------------------------API SIMULATION--------------------------------------------------------------
+
+		//columns: customerID, billingcycle,invoiceID,total,taxes,discount,invoice_date
+		bss_API_call := ` select id,customer_id,billing_cycle,invoice_id,total,taxes,discount,invoice_date from bss_simulation_api where id =$1 ; `
+		rows, err = db.QueryContext(context.Background(), bss_API_call, parentID)
+
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+
+		defer rows.Close()
+
+		for rows.Next() {
+			var groupID int
+			var customerID int
+			var billingcycle string
+			var invoiceID int
+			var total float64
+			var taxes float64
+			var discount float64
+			var invoice_date string
+
+			err := rows.Scan(&groupID, &customerID, &billingcycle, &invoiceID, &total, &taxes, &discount, &invoice_date)
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+
+			//insert the BSS services into the consolidated_bills_summary table
+
+			insertBSSservices := ` INSERT INTO public.consolidated_bills_summary (group_id,"period","cycle",account_id,group_name,address,bill_source,acct_serv_id,serv_name,total,taxes,discount,account_type,created_at)
+								VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())`
+
+			_, err = db.ExecContext(context.Background(), insertBSSservices, groupID, invoice_date, billingcycle, customerID, groupNametemp, addresstemp, "bss", invoiceID, "Postpaid", total, taxes, discount, cust_typeTemp)
+
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+
+		}
+
+		//-----------------------------------------------------------------------------------------------
+
+	} //end of parentID loop
+
+	println("Child services inserted successfully")
+
+	//call the generate report function
+
+	generateReport(db)
+
+	filePath := "consolidated_report.xlsx"
+	if err := f.SaveAs(filePath); err != nil {
+		log.Fatalf("Failed to save Excel file: %v", err)
+	}
+
+	fmt.Println("Report generated successfully: ", filePath)
+
+}
+
+func dbconn() (*sql.DB, error) {
+	err := godotenv.Load()
+
+	if err != nil {
+		return nil, fmt.Errorf("error loading .env file: %v", err)
+	}
+
+	//Initialize ENV variables (port had to be converted becasue its a string)
+	host := os.Getenv("DB_HOST")
+	portStr := os.Getenv("DB_PORT")
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Fatalf("Invalid port number: %v", err)
+	}
+	dbname := os.Getenv("DB_DATABASE")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+
+	// Set up database connection
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
+	db, err := sql.Open("pgx", psqlInfo)
+	if err != nil {
+		return nil, fmt.Errorf("error opening database connection: %v", err)
+
+	}
+
+	return db, err
+
+}
+
+func generateReport(db *sql.DB) {
+	query := `
+        SELECT group_id, account_id, group_name, address, serv_name, total, taxes, discount, account_type
+        FROM consolidated_bills_summary
+        ORDER BY group_id
+    `
+
+	rows, err := db.Query(query)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	var GOBRecords []Record
+	var BusinessRecords []Record
+	recordsMap := []Record{}
+	serviceNames := make(map[string]bool)
+
+	for rows.Next() {
+
+		var servName string
+		var record Record
+
+		if err := rows.Scan(&record.GroupID, &record.AccountID, &record.GroupName, &record.Address, &servName, &record.Total, &record.Taxes, &record.Discount, &record.Accounttype); err != nil {
+			log.Fatal(err)
+		}
+
+		if record.Services == nil {
+			record.Services = make(map[string]float64)
+		}
+
+		record.Services[servName] += record.Total
+
+		recordsMap = append(recordsMap, record)
+
+		serviceNames[servName] = true
+
+	}
+
+	for _, record := range recordsMap {
+		if record.Accounttype == "GOB" {
+			GOBRecords = append(GOBRecords, record)
+		} else {
+			BusinessRecords = append(BusinessRecords, record)
+		}
+	}
+
+	sheetName := "GOB Breakdown"
+	f.SetSheetName("Sheet1", sheetName)
+
+	headers := []string{"No.", "Customer Name", "Address"}
+	serviceList := make([]string, 0, len(serviceNames))
+	for serv := range serviceNames {
+		serviceList = append(serviceList, serv)
+	}
+	headers = append(headers, serviceList...)
+	headers = append(headers, "Total", "GST", "Subtotal")
+
+	for i, header := range headers {
+		col := string('A' + i)
+		f.SetCellValue(sheetName, col+"1", header)
+		f.SetColWidth(sheetName, col, col, 20)
+	}
+
+	rowNum := 2
+	groupStartRow := rowNum
+	groupTotal := 0.0
+	groupGST := 0.0
+	groupSubtotal := 0.0
+	var prevGroupID int
+
+	//....................................................GOB ACCOUNTS......................................................
+	for i, record := range GOBRecords {
+		currentGroupID := record.GroupID
+
+		// Check if groupID has changed (excluding the first iteration)
+		if i > 0 && currentGroupID != prevGroupID {
+			// Insert group total row before starting a new group
+			lastRow := rowNum
+			f.SetCellValue(sheetName, fmt.Sprintf("B%d", rowNum), "Total:")
+
+			for i := 0; i < len(serviceList); i++ {
+				col := string('D' + i)
+				sumFormula := fmt.Sprintf("SUM(%s%d:%s%d)", col, groupStartRow, col, lastRow-1)
+				f.SetCellFormula(sheetName, fmt.Sprintf("%s%d", col, rowNum), sumFormula)
+			}
+
+			// Write group totals
+			colIndex := 3 + len(serviceList)
+			f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
+			f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
+			f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+
+			rowNum += 2                                         // Move to next row for new group
+			groupStartRow = rowNum                              // Reset start row for new group
+			groupTotal, groupGST, groupSubtotal = 0.0, 0.0, 0.0 // Reset group totals
+		}
+
+		// Store row data
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", rowNum), rowNum-1)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", rowNum), record.GroupName)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", rowNum), record.Address)
+
+		colIndex := 3
+		for _, serv := range serviceList {
+			col := string('A' + colIndex)
+			if value, exists := record.Services[serv]; exists {
+				f.SetCellValue(sheetName, fmt.Sprintf("%s%d", col, rowNum), value)
+			}
+			colIndex++
+		}
+
+		gst := record.Total * 0.125
+		subtotal := record.Total + gst
+
+		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), record.Total)
+		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), gst)
+		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), subtotal)
+
+		// Accumulate group totals
+		groupTotal += record.Total
+		groupGST += gst
+		groupSubtotal += subtotal
+
+		// Update previous group ID for next iteration
+		prevGroupID = currentGroupID
+
+		rowNum++ // Move to next row
+	}
+
+	// Final group total (for the last group)
+	if len(GOBRecords) > 0 {
+		lastRow := rowNum
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", rowNum), "Total:")
+
+		for i := 0; i < len(serviceList); i++ {
+			col := string('D' + i)
+			sumFormula := fmt.Sprintf("SUM(%s%d:%s%d)", col, groupStartRow, col, lastRow-1)
+			f.SetCellFormula(sheetName, fmt.Sprintf("%s%d", col, rowNum), sumFormula)
+		}
+
+		colIndex := 3 + len(serviceList)
+		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
+		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
+		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+
+		rowNum++ // Move past the final total row
+	}
+
+	//....................................................BUSINESS ACCOUNTS......................................................
+
+	BusinessAccounts(db, BusinessRecords, serviceNames)
+}
+
+func BusinessAccounts(db *sql.DB, BusinessRecords []Record, serviceNames map[string]bool) {
+
+	rowNum := 2
+	groupStartRow := rowNum
+	groupTotal := 0.0
+	groupGST := 0.0
+	groupSubtotal := 0.0
+	var prevGroupID int
+
+	BUSsheetName := "Business Breakdown"
+	f.NewSheet(BUSsheetName)
+
+	Busheaders := []string{"No.", "Customer Name", "Address"}
+	BUSserviceList := make([]string, 0, len(serviceNames))
+	for serv := range serviceNames {
+		BUSserviceList = append(BUSserviceList, serv)
+	}
+	Busheaders = append(Busheaders, BUSserviceList...)
+	Busheaders = append(Busheaders, "Total", "GST", "Subtotal")
+
+	for i, header := range Busheaders {
+		col := string('A' + i)
+		f.SetCellValue(BUSsheetName, col+"1", header)
+		f.SetColWidth(BUSsheetName, col, col, 20)
+	}
+
+	for i, BUSrecord := range BusinessRecords {
+		currentGroupID := BUSrecord.GroupID
+
+		// Check if groupID has changed (excluding the first iteration)
+		if i > 0 && currentGroupID != prevGroupID {
+			// Insert group total row before starting a new group
+			lastRow := rowNum
+			f.SetCellValue(BUSsheetName, fmt.Sprintf("B%d", rowNum), "Total:")
+
+			for i := 0; i < len(BUSserviceList); i++ {
+				col := string('D' + i)
+				sumFormula := fmt.Sprintf("SUM(%s%d:%s%d)", col, groupStartRow, col, lastRow-1)
+				f.SetCellFormula(BUSsheetName, fmt.Sprintf("%s%d", col, rowNum), sumFormula)
+			}
+
+			// Write group totals
+			colIndex := 3 + len(BUSserviceList)
+			f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
+			f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
+			f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+
+			rowNum += 2                                         // Move to next row for new group
+			groupStartRow = rowNum                              // Reset start row for new group
+			groupTotal, groupGST, groupSubtotal = 0.0, 0.0, 0.0 // Reset group totals
+		}
+
+		// Store row data
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("A%d", rowNum), rowNum-1)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("B%d", rowNum), BUSrecord.GroupName)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("C%d", rowNum), BUSrecord.Address)
+
+		colIndex := 3
+		for _, serv := range BUSserviceList {
+			col := string('A' + colIndex)
+			if value, exists := BUSrecord.Services[serv]; exists {
+				f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", col, rowNum), value)
+			}
+			colIndex++
+		}
+
+		gst := BUSrecord.Total * 0.125
+		subtotal := BUSrecord.Total + gst
+
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), BUSrecord.Total)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), gst)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), subtotal)
+
+		// Accumulate group totals
+		groupTotal += BUSrecord.Total
+		groupGST += gst
+		groupSubtotal += subtotal
+
+		// Update previous group ID for next iteration
+		prevGroupID = currentGroupID
+
+		rowNum++ // Move to next row
+	}
+
+	// Final group total (for the last group)
+	if len(BusinessRecords) > 0 {
+		lastRow := rowNum
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("B%d", rowNum), "Total:")
+
+		for i := 0; i < len(BUSserviceList); i++ {
+			col := string('D' + i)
+			sumFormula := fmt.Sprintf("SUM(%s%d:%s%d)", col, groupStartRow, col, lastRow-1)
+			f.SetCellFormula(BUSsheetName, fmt.Sprintf("%s%d", col, rowNum), sumFormula)
+		}
+
+		colIndex := 3 + len(BUSserviceList)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
+		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+
+		rowNum++ // Move past the final total row
+	}
+
+}
