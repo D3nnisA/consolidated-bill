@@ -336,8 +336,8 @@ func generateReport(db *sql.DB) {
 			}
 		}
 
-		recordsMap[groupID][key].Services[servName] += total
-		recordsMap[groupID][key].Total += total
+		recordsMap[groupID][key].Services[servName] += total //add the total to the services map
+		recordsMap[groupID][key].Total += total              // add the total to the total field
 		serviceNames[servName] = true
 	}
 
