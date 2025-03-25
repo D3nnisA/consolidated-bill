@@ -345,12 +345,43 @@ func generateReport(db *sql.DB) {
 		serviceList = append(serviceList, serv)
 	}
 	headers = append(headers, serviceList...)
-	headers = append(headers, "Total", "GST", "Subtotal")
+	headers = append(headers, "Discounts", "Total", "GST", "Subtotal")
+
+	//.......................GOB BREAKDOWN STYLE......................................................
+	GOBstyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{Bold: true, Color: "#FFFFFF"},
+		Fill: excelize.Fill{Type: "pattern", Color: []string{"#4F81BD"}, Pattern: 1},
+	})
+	GOBtotalStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{Bold: true, Color: "#4F81BD"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#4F81BD", Style: 5},
+			{Type: "bottom", Color: "#4F81BD", Style: 5},
+			// {Type: "left", Color: "#4F81BD", Style: 5},
+			// {Type: "right", Color: "#4F81BD", Style: 5}
+		},
+	})
+
+	groups_style, _ := f.NewStyle(&excelize.Style{
+
+		Font: &excelize.Font{Bold: true, Color: "#000000"},
+	})
+
+	overall_total, _ := f.NewStyle(&excelize.Style{
+
+		Font: &excelize.Font{Bold: true, Color: "#000000"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 5},
+			{Type: "bottom", Color: "#000000", Style: 5},
+		},
+	})
+	//....................................................................................
 
 	for i, header := range headers {
 		col := string('A' + i)
 		f.SetCellValue(sheetName, col+"1", header)
 		f.SetColWidth(sheetName, col, col, 20)
+		f.SetCellStyle(sheetName, col+"1", col+"1", GOBstyle)
 	}
 
 	rowNum := 2
@@ -358,6 +389,9 @@ func generateReport(db *sql.DB) {
 	groupTotal := 0.0
 	groupGST := 0.0
 	groupSubtotal := 0.0
+	var overallTotals []float64
+	var overallGSTs []float64
+	var overallSubtotals []float64
 	var prevGroupID int
 
 	//....................................................GOB ACCOUNTS......................................................
@@ -377,10 +411,15 @@ func generateReport(db *sql.DB) {
 			}
 
 			// Write group totals
-			colIndex := 3 + len(serviceList)
+			colIndex := 4 + len(serviceList)
 			f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
 			f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
 			f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+			f.SetCellStyle(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), GOBtotalStyle) // Apply style to group totals
+
+			overallTotals = append(overallTotals, groupTotal)
+			overallGSTs = append(overallGSTs, groupGST)
+			overallSubtotals = append(overallSubtotals, groupSubtotal)
 
 			rowNum += 2                                         // Move to next row for new group
 			groupStartRow = rowNum                              // Reset start row for new group
@@ -391,8 +430,9 @@ func generateReport(db *sql.DB) {
 		f.SetCellValue(sheetName, fmt.Sprintf("A%d", rowNum), rowNum-1)
 		f.SetCellValue(sheetName, fmt.Sprintf("B%d", rowNum), record.GroupName)
 		f.SetCellValue(sheetName, fmt.Sprintf("C%d", rowNum), record.Address)
+		f.SetCellStyle(sheetName, fmt.Sprintf("A%d", groupStartRow), fmt.Sprintf("%s%d", string('A'+rowNum), rowNum-1), groups_style)
 
-		colIndex := 3
+		colIndex := 4
 		for _, serv := range serviceList {
 			col := string('A' + colIndex)
 			if value, exists := record.Services[serv]; exists {
@@ -417,6 +457,7 @@ func generateReport(db *sql.DB) {
 		prevGroupID = currentGroupID
 
 		rowNum++ // Move to next row
+
 	}
 
 	// Final group total (for the last group)
@@ -430,13 +471,40 @@ func generateReport(db *sql.DB) {
 			f.SetCellFormula(sheetName, fmt.Sprintf("%s%d", col, rowNum), sumFormula)
 		}
 
-		colIndex := 3 + len(serviceList)
+		colIndex := 4 + len(serviceList)
 		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
 		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
 		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+		f.SetCellStyle(sheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), GOBtotalStyle)
+
+		//Being that the last group is calculated differently we add this here to get the total of the last group
+		overallTotals = append(overallTotals, groupTotal)
+		overallGSTs = append(overallGSTs, groupGST)
+		overallSubtotals = append(overallSubtotals, groupSubtotal)
 
 		rowNum++ // Move past the final total row
+
 	}
+
+	overallTotalSum := 0.0
+	overallGSTSum := 0.0
+	overallSubtotalSum := 0.0
+
+	for _, total := range overallTotals {
+		overallTotalSum += total
+	}
+	for _, gst := range overallGSTs {
+		overallGSTSum += gst
+	}
+	for _, subtotal := range overallSubtotals {
+		overallSubtotalSum += subtotal
+	}
+
+	finalRow := rowNum + 1
+	f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-3), finalRow), overallTotalSum)
+	f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-2), finalRow), overallGSTSum)
+	f.SetCellValue(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-1), finalRow), overallSubtotalSum)
+	f.SetCellStyle(sheetName, fmt.Sprintf("%s%d", string('A'+len(headers)-3), finalRow), fmt.Sprintf("%s%d", string('A'+len(headers)-1), finalRow), overall_total)
 
 	//....................................................BUSINESS ACCOUNTS......................................................
 
@@ -450,6 +518,9 @@ func BusinessAccounts(db *sql.DB, BusinessRecords []Record, serviceNames map[str
 	groupTotal := 0.0
 	groupGST := 0.0
 	groupSubtotal := 0.0
+	var overallTotals []float64
+	var overallGSTs []float64
+	var overallSubtotals []float64
 	var prevGroupID int
 
 	BUSsheetName := "Business Breakdown"
@@ -489,6 +560,10 @@ func BusinessAccounts(db *sql.DB, BusinessRecords []Record, serviceNames map[str
 			f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex), rowNum), groupTotal)
 			f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
 			f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
+
+			overallTotals = append(overallTotals, groupTotal)
+			overallGSTs = append(overallGSTs, groupGST)
+			overallSubtotals = append(overallSubtotals, groupSubtotal)
 
 			rowNum += 2                                         // Move to next row for new group
 			groupStartRow = rowNum                              // Reset start row for new group
@@ -543,7 +618,30 @@ func BusinessAccounts(db *sql.DB, BusinessRecords []Record, serviceNames map[str
 		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+1), rowNum), groupGST)
 		f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+colIndex+2), rowNum), groupSubtotal)
 
+		overallTotals = append(overallTotals, groupTotal)
+		overallGSTs = append(overallGSTs, groupGST)
+		overallSubtotals = append(overallSubtotals, groupSubtotal)
+
 		rowNum++ // Move past the final total row
 	}
+
+	overallTotalSum := 0.0
+	overallGSTSum := 0.0
+	overallSubtotalSum := 0.0
+
+	for _, total := range overallTotals {
+		overallTotalSum += total
+	}
+	for _, gst := range overallGSTs {
+		overallGSTSum += gst
+	}
+	for _, subtotal := range overallSubtotals {
+		overallSubtotalSum += subtotal
+	}
+
+	finalRow := rowNum + 1
+	f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+len(Busheaders)-3), finalRow), overallTotalSum)
+	f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+len(Busheaders)-2), finalRow), overallGSTSum)
+	f.SetCellValue(BUSsheetName, fmt.Sprintf("%s%d", string('A'+len(Busheaders)-1), finalRow), overallSubtotalSum)
 
 }
